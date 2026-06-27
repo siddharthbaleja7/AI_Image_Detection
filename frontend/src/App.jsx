@@ -70,6 +70,8 @@ function App() {
   const [scanMessage, setScanMessage] = useState(TICKER_MESSAGES[0]);
   const [dragActive, setDragActive] = useState(false);
   const [history, setHistory] = useState([]);
+  const [persistentPreview, setPersistentPreview] = useState("");
+  const [persistentThumbnail, setPersistentThumbnail] = useState("");
   
   const fileInputRef = useRef(null);
   const tickerIntervalRef = useRef(null);
@@ -142,7 +144,7 @@ function App() {
     setStatus("idle");
     setErrorMsg("");
 
-    // Calculate dimensions
+    // Calculate dimensions & generate persistent compressed images
     const img = new Image();
     img.src = objectUrl;
     img.onload = () => {
@@ -153,6 +155,45 @@ function App() {
         dimensions: `${img.width} × ${img.height} px`,
         rawSize: selectedFile.size
       });
+
+      try {
+        // 1. Generate Medium Preview (max 400px bounds)
+        const previewCanvas = document.createElement("canvas");
+        const maxPreviewDim = 400;
+        let pWidth = img.width;
+        let pHeight = img.height;
+        if (pWidth > maxPreviewDim || pHeight > maxPreviewDim) {
+          if (pWidth > pHeight) {
+            pHeight = Math.round((pHeight * maxPreviewDim) / pWidth);
+            pWidth = maxPreviewDim;
+          } else {
+            pWidth = Math.round((pWidth * maxPreviewDim) / pHeight);
+            pHeight = maxPreviewDim;
+          }
+        }
+        previewCanvas.width = pWidth;
+        previewCanvas.height = pHeight;
+        const pCtx = previewCanvas.getContext("2d");
+        pCtx.drawImage(img, 0, 0, pWidth, pHeight);
+        const base64Preview = previewCanvas.toDataURL("image/jpeg", 0.7);
+        setPersistentPreview(base64Preview);
+
+        // 2. Generate Small Square Thumbnail (80x80 px center crop)
+        const thumbCanvas = document.createElement("canvas");
+        thumbCanvas.width = 80;
+        thumbCanvas.height = 80;
+        const tCtx = thumbCanvas.getContext("2d");
+        const minDim = Math.min(img.width, img.height);
+        const sx = (img.width - minDim) / 2;
+        const sy = (img.height - minDim) / 2;
+        tCtx.drawImage(img, sx, sy, minDim, minDim, 0, 0, 80, 80);
+        const base64Thumb = thumbCanvas.toDataURL("image/jpeg", 0.6);
+        setPersistentThumbnail(base64Thumb);
+      } catch (e) {
+        console.error("Canvas scaling error, falling back to blob URLs", e);
+        setPersistentPreview(objectUrl);
+        setPersistentThumbnail(objectUrl);
+      }
     };
   };
 
@@ -221,9 +262,8 @@ function App() {
       const historyItem = {
         id: Date.now().toString(),
         filename: file.name,
-        // Save preview url or a small thumbnail if persistent is needed. 
-        // We'll store a placeholder fallback image or the object URL for active session
-        preview: preview,
+        preview: persistentPreview || preview,
+        thumbnail: persistentThumbnail || preview,
         prediction: data.prediction,
         confidence: data.confidence,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -239,7 +279,8 @@ function App() {
 
     } catch (err) {
       console.error(err);
-      setErrorMsg(err.message || "Network Error: Could not connect to inference backend server.");
+      const detail = err.response?.data?.detail || err.message || "Network Error: Could not connect to inference backend server.";
+      setErrorMsg(detail);
       setStatus("error");
     }
   };
@@ -252,7 +293,15 @@ function App() {
       
       // Fetch image from preset URL
       const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: Failed to download preset image.`);
+      }
+      
       const blob = await res.blob();
+      if (!blob.type.startsWith("image/")) {
+        throw new Error(`Invalid content type: ${blob.type}. The request might have been blocked or rate-limited.`);
+      }
+
       const presetFile = new File([blob], name, { type: blob.type });
       
       handleFile(presetFile);
@@ -263,7 +312,7 @@ function App() {
       }, 100);
     } catch (e) {
       console.error("Failed to load preset image", e);
-      alert("Failed to load preset image. Make sure you are online.");
+      alert(e.message || "Failed to load preset image. Make sure you are online.");
       setStatus("idle");
     }
   };
@@ -271,6 +320,8 @@ function App() {
   // Re-load result from history log
   const loadHistoryItem = (item) => {
     setPreview(item.preview);
+    setPersistentPreview(item.preview || "");
+    setPersistentThumbnail(item.thumbnail || "");
     setFile(null); // Clear file to indicate read-only view from history
     setResult({
       prediction: item.prediction,
@@ -642,7 +693,7 @@ function App() {
                   onClick={() => loadHistoryItem(item)}
                 >
                   <img 
-                    src={item.preview || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100"} 
+                    src={item.thumbnail || item.preview || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100"} 
                     alt="Thumbnail" 
                     className="history-thumbnail"
                   />
